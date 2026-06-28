@@ -13,6 +13,11 @@ interface Project {
   bhk_types: string[]; possession_date: string
 }
 
+interface Location {
+  id: number
+  name: string
+}
+
 interface FormData {
   name: string; developer: string; location: string
   rera_number: string; status: string; possession_date: string
@@ -40,7 +45,6 @@ const EMPTY: FormData = {
   lm4_name: '', lm4_dist: '', lm4_type: 'IT Park',
 }
 
-const LOCS = ['Bagalur Road','Bannerghatta Rd','Electronic City','Hebbal','Hoskote','Kanakapura Road','KR Puram','Sarjapur','Thanisandra','Whitefield','Yelahanka']
 const BHKS = ['Studio','1BHK','2BHK','2.5BHK','3BHK','4BHK','Villa','Plot']
 const LM_TYPES = ['Metro','School','Hospital','IT Park','Mall','Airport','Highway','Other']
 
@@ -55,7 +59,7 @@ function fmt(n: number) {
 }
 
 export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
-  const [section, setSection] = useState<'projects' | 'add' | 'team'>('projects')
+  const [section, setSection] = useState<'projects' | 'add' | 'locations' | 'team'>('projects')
   const [projects, setProjects] = useState<Project[]>([])
   const [form, setForm] = useState<FormData>(EMPTY)
   const [editId, setEditId] = useState<string | null>(null)
@@ -68,6 +72,15 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
   const [newPass, setNewPass] = useState('')
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
 
+  // Locations state
+  const [locations, setLocations] = useState<Location[]>([])
+  const [locationCounts, setLocationCounts] = useState<Record<string, number>>({})
+  const [newLocation, setNewLocation] = useState('')
+  const [addLocWarning, setAddLocWarning] = useState('')
+  const [addLocIsDuplicate, setAddLocIsDuplicate] = useState(false)
+  const [addLocForce, setAddLocForce] = useState(false)
+  const [formLocWarning, setFormLocWarning] = useState('')
+
   useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth < 768)
     window.addEventListener('resize', handleResize)
@@ -76,14 +89,25 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
 
   const loadProjects = async () => {
     const { data } = await supabase.from('projects').select('*').order('name')
-    setProjects(data as Project[] || [])
+    const rows = (data as Project[]) || []
+    setProjects(rows)
+    // rebuild location counts from live project data
+    const counts: Record<string, number> = {}
+    rows.forEach(p => { counts[p.location] = (counts[p.location] || 0) + 1 })
+    setLocationCounts(counts)
   }
+
+  const loadLocations = async () => {
+    const { data } = await supabase.from('locations').select('*').order('name')
+    setLocations((data as Location[]) || [])
+  }
+
   const loadTeam = async () => {
     const { data } = await supabase.from('salespersons').select('id,name,mobile_number,role').order('name')
     setTeam(data || [])
   }
 
-  useEffect(() => { loadProjects(); loadTeam() }, [])
+  useEffect(() => { loadProjects(); loadTeam(); loadLocations() }, [])
 
   const flash = (m: string, t: 'ok' | 'err' = 'ok') => {
     setMsg(m); setMsgType(t)
@@ -92,6 +116,73 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
 
   const setF = (k: keyof FormData, v: any) => setForm(f => ({ ...f, [k]: v }))
   const toggleBHK = (b: string) => setF('bhk_types', form.bhk_types.includes(b) ? form.bhk_types.filter((x: string) => x !== b) : [...form.bhk_types, b])
+
+  // Find fuzzy match against existing locations
+  const findSimilar = (typed: string, locs: Location[]) => {
+    const t = typed.toLowerCase().trim()
+    return locs.find(l => {
+      const e = l.name.toLowerCase()
+      return e !== t && (e.includes(t) || t.includes(e))
+    })
+  }
+
+  // Form location combobox handler
+  const handleLocationInput = (val: string) => {
+    setF('location', val)
+    setFormLocWarning('')
+    if (!val.trim()) return
+    const t = val.toLowerCase().trim()
+    const exact = locations.find(l => l.name.toLowerCase() === t)
+    if (exact) return
+    const similar = findSimilar(val, locations)
+    if (similar) setFormLocWarning(`Similar to "${similar.name}" — did you mean that?`)
+  }
+
+  const useExistingLocation = () => {
+    const similar = findSimilar(form.location, locations)
+    if (similar) { setF('location', similar.name); setFormLocWarning('') }
+  }
+
+  // New location (Locations section) handlers
+  const handleNewLocationInput = (val: string) => {
+    setNewLocation(val)
+    setAddLocWarning('')
+    setAddLocIsDuplicate(false)
+    setAddLocForce(false)
+    if (!val.trim()) return
+    const t = val.toLowerCase().trim()
+    const exact = locations.find(l => l.name.toLowerCase() === t)
+    if (exact) {
+      setAddLocWarning(`"${exact.name}" already exists.`)
+      setAddLocIsDuplicate(true)
+      return
+    }
+    const similar = findSimilar(val, locations)
+    if (similar) setAddLocWarning(`Similar to "${similar.name}" — is this intentionally a new location?`)
+  }
+
+  const addLocation = async () => {
+    const name = newLocation.trim()
+    if (!name || addLocIsDuplicate) return
+    const { error } = await supabase.from('locations').insert({ name })
+    if (error) { flash('Error: ' + error.message, 'err'); return }
+    flash(`✅ "${name}" added!`)
+    setNewLocation(''); setAddLocWarning(''); setAddLocForce(false); setAddLocIsDuplicate(false)
+    loadLocations()
+  }
+
+  const deleteLocation = async (id: number, name: string) => {
+    const count = locationCounts[name] || 0
+    if (count > 0) {
+      flash(`Cannot delete "${name}" — ${count} project${count > 1 ? 's' : ''} use this location. Reassign them first.`, 'err')
+      return
+    }
+    if (!confirm(`Delete "${name}"?`)) return
+    const { error } = await supabase.from('locations').delete().eq('id', id)
+    if (error) { flash('Error: ' + error.message, 'err'); return }
+    flash(`"${name}" removed.`)
+    loadLocations()
+  }
 
   const startEdit = (p: any) => {
     setForm({
@@ -110,8 +201,7 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
       lm3_name: p.landmarks?.[2]?.name || '', lm3_dist: p.landmarks?.[2]?.distance || '', lm3_type: p.landmarks?.[2]?.type || 'Hospital',
       lm4_name: p.landmarks?.[3]?.name || '', lm4_dist: p.landmarks?.[3]?.distance || '', lm4_type: p.landmarks?.[3]?.type || 'IT Park',
     })
-    setEditId(p.id)
-    setSection('add')
+    setEditId(p.id); setFormLocWarning(''); setSection('add')
   }
 
   const handleDelete = async (id: string) => {
@@ -153,8 +243,16 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
 
     setSaving(false)
     if (error) { flash('Error: ' + error.message, 'err'); return }
+
+    // Auto-add location to locations table if it's genuinely new
+    const locExists = locations.find(l => l.name.toLowerCase() === form.location.toLowerCase())
+    if (!locExists) {
+      await supabase.from('locations').insert({ name: form.location.trim() })
+      loadLocations()
+    }
+
     flash(editId ? '✅ Project updated!' : '✅ Project published!')
-    setForm(EMPTY); setEditId(null)
+    setForm(EMPTY); setEditId(null); setFormLocWarning('')
     loadProjects(); setSection('projects')
   }
 
@@ -171,6 +269,15 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
     await supabase.from('salespersons').delete().eq('id', id)
     loadTeam()
   }
+
+  const canAddLoc = newLocation.trim() && !addLocIsDuplicate && (!addLocWarning || addLocForce)
+
+  const NAV_ITEMS: [string, string][] = [
+    ['projects', '📋 All Projects'],
+    ['add', editId ? '✏️ Edit Project' : '➕ Add Project'],
+    ['locations', '📍 Locations'],
+    ['team', '👥 Team'],
+  ]
 
   return (
     <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg,#0F0C29,#1E1B4B)', color: 'white', display: 'flex', flexDirection: 'column' }}>
@@ -191,10 +298,10 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
 
       {/* MOBILE TABS */}
       {isMobile && (
-        <div style={{ display: 'flex', background: 'rgba(10,8,30,0.9)', borderBottom: '1px solid rgba(79,70,229,0.2)', padding: '0 8px' }}>
-          {[['projects','📋 Projects'],['add', editId ? '✏️ Edit' : '➕ Add'],['team','👥 Team']].map(([k, l]) => (
+        <div style={{ display: 'flex', background: 'rgba(10,8,30,0.9)', borderBottom: '1px solid rgba(79,70,229,0.2)', padding: '0 4px', overflowX: 'auto' }}>
+          {NAV_ITEMS.map(([k, l]) => (
             <button key={k} onClick={() => { setSection(k as any); if (k !== 'add') { setEditId(null); setForm(EMPTY) } }}
-              style={{ flex: 1, padding: '12px 4px', border: 'none', fontSize: 12, cursor: 'pointer', background: 'transparent', color: section === k ? '#A5B4FC' : '#64748B', borderBottom: section === k ? '2px solid #6366F1' : '2px solid transparent', fontWeight: section === k ? 600 : 400 }}>
+              style={{ flexShrink: 0, padding: '12px 10px', border: 'none', fontSize: 11, cursor: 'pointer', background: 'transparent', color: section === k ? '#A5B4FC' : '#64748B', borderBottom: section === k ? '2px solid #6366F1' : '2px solid transparent', fontWeight: section === k ? 600 : 400 }}>
               {l}
             </button>
           ))}
@@ -206,10 +313,12 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
         {/* DESKTOP SIDEBAR */}
         {!isMobile && (
           <aside style={{ width: 220, background: 'rgba(10,8,30,0.8)', borderRight: '1px solid rgba(79,70,229,0.2)', padding: 16, flexShrink: 0 }}>
-            {[['projects','📋 All Projects'],['add', editId ? '✏️ Edit Project' : '➕ Add Project'],['team','👥 Team']].map(([k, l]) => (
+            {NAV_ITEMS.map(([k, l]) => (
               <button key={k} onClick={() => { setSection(k as any); if (k !== 'add') { setEditId(null); setForm(EMPTY) } }}
                 style={{ display: 'block', width: '100%', textAlign: 'left', padding: '11px 14px', marginBottom: 6, borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 13, background: section === k ? 'rgba(79,70,229,0.35)' : 'transparent', color: section === k ? '#A5B4FC' : '#64748B' }}>
-                {l} {k === 'projects' && <span style={{ float: 'right', background: 'rgba(79,70,229,0.4)', padding: '1px 7px', borderRadius: 10, fontSize: 11 }}>{projects.length}</span>}
+                {l}
+                {k === 'projects' && <span style={{ float: 'right', background: 'rgba(79,70,229,0.4)', padding: '1px 7px', borderRadius: 10, fontSize: 11 }}>{projects.length}</span>}
+                {k === 'locations' && <span style={{ float: 'right', background: 'rgba(79,70,229,0.4)', padding: '1px 7px', borderRadius: 10, fontSize: 11 }}>{locations.length}</span>}
               </button>
             ))}
           </aside>
@@ -226,12 +335,10 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
                 <h2 style={{ margin: 0, fontSize: isMobile ? 17 : 20 }}>All Projects ({projects.length})</h2>
                 <button onClick={() => setSection('add')} style={{ background: 'linear-gradient(135deg,#4F46E5,#9333EA)', border: 'none', borderRadius: 8, padding: '9px 14px', color: 'white', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}>+ Add New</button>
               </div>
-
               {projects.length === 0
                 ? <div style={{ textAlign: 'center', padding: 60, color: '#64748B' }}>No projects yet. Add your first one!</div>
                 : isMobile
-                  ? /* MOBILE CARDS VIEW */
-                    <div>
+                  ? <div>
                       {projects.map(p => (
                         <div key={p.id} style={{ background: 'rgba(79,70,229,0.08)', border: '1px solid rgba(79,70,229,0.2)', borderRadius: 12, padding: 16, marginBottom: 12 }}>
                           <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>{p.name}</div>
@@ -249,8 +356,7 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
                         </div>
                       ))}
                     </div>
-                  : /* DESKTOP TABLE VIEW */
-                    <div style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid rgba(79,70,229,0.2)' }}>
+                  : <div style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid rgba(79,70,229,0.2)' }}>
                       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
                         <thead>
                           <tr style={{ background: 'rgba(79,70,229,0.2)' }}>
@@ -263,9 +369,7 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
                               <td style={{ padding: '13px 16px', fontWeight: 600 }}>{p.name}</td>
                               <td style={{ padding: '13px 16px', color: '#94A3B8' }}>{p.developer}</td>
                               <td style={{ padding: '13px 16px', color: '#94A3B8' }}>{p.location}</td>
-                              <td style={{ padding: '13px 16px' }}>
-                                <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 20, background: p.status === 'Ready to Move' ? 'rgba(16,185,129,0.2)' : 'rgba(245,158,11,0.2)', color: p.status === 'Ready to Move' ? '#10B981' : '#F59E0B' }}>{p.status}</span>
-                              </td>
+                              <td style={{ padding: '13px 16px' }}><span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 20, background: p.status === 'Ready to Move' ? 'rgba(16,185,129,0.2)' : 'rgba(245,158,11,0.2)', color: p.status === 'Ready to Move' ? '#10B981' : '#F59E0B' }}>{p.status}</span></td>
                               <td style={{ padding: '13px 16px', color: '#A5B4FC' }}>{fmt(p.price_min)} – {fmt(p.price_max)}</td>
                               <td style={{ padding: '13px 16px' }}>
                                 <div style={{ display: 'flex', gap: 8 }}>
@@ -294,10 +398,22 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
                   <div><label style={lbl}>Developer *</label><input style={inp} value={form.developer} onChange={e => setF('developer', e.target.value)} placeholder="e.g. Sobha Developers" /></div>
                   <div>
                     <label style={lbl}>Location *</label>
-                    <select style={inp} value={form.location} onChange={e => setF('location', e.target.value)}>
-                      <option value="" style={{ background: '#1E1B4B' }}>Select location</option>
-                      {LOCS.map(l => <option key={l} value={l} style={{ background: '#1E1B4B' }}>{l}</option>)}
-                    </select>
+                    <input
+                      list="loc-suggestions"
+                      style={inp}
+                      value={form.location}
+                      onChange={e => handleLocationInput(e.target.value)}
+                      placeholder="Type or pick a location..."
+                    />
+                    <datalist id="loc-suggestions">
+                      {locations.map(l => <option key={l.id} value={l.name} />)}
+                    </datalist>
+                    {formLocWarning && (
+                      <div style={{ marginTop: 6, fontSize: 12, color: '#F59E0B', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        ⚠ {formLocWarning}
+                        <button onClick={useExistingLocation} style={{ fontSize: 11, background: 'rgba(245,158,11,0.2)', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 4, padding: '2px 8px', color: '#F59E0B', cursor: 'pointer' }}>Use existing</button>
+                      </div>
+                    )}
                   </div>
                   <div><label style={lbl}>RERA Number</label><input style={inp} value={form.rera_number} onChange={e => setF('rera_number', e.target.value)} placeholder="Optional" /></div>
                   <div>
@@ -379,7 +495,82 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
                 <button onClick={save} disabled={saving} style={{ background: 'linear-gradient(135deg,#4F46E5,#9333EA)', border: 'none', borderRadius: 8, padding: '12px 28px', color: 'white', fontWeight: 700, cursor: saving ? 'default' : 'pointer', fontSize: 15, opacity: saving ? 0.7 : 1 }}>
                   {saving ? 'Saving...' : editId ? '✅ Update' : '🚀 Publish'}
                 </button>
-                <button onClick={() => { setForm(EMPTY); setEditId(null); setSection('projects') }} style={{ background: 'transparent', border: '1px solid rgba(165,180,252,0.3)', borderRadius: 8, padding: '12px 20px', color: '#A5B4FC', cursor: 'pointer', fontSize: 14 }}>Cancel</button>
+                <button onClick={() => { setForm(EMPTY); setEditId(null); setFormLocWarning(''); setSection('projects') }} style={{ background: 'transparent', border: '1px solid rgba(165,180,252,0.3)', borderRadius: 8, padding: '12px 20px', color: '#A5B4FC', cursor: 'pointer', fontSize: 14 }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {/* LOCATIONS */}
+          {section === 'locations' && (
+            <div>
+              <h2 style={{ fontSize: isMobile ? 17 : 20, marginBottom: 6 }}>📍 Locations ({locations.length})</h2>
+              <p style={{ fontSize: 13, color: '#64748B', marginBottom: 20 }}>Locations added here appear in the salesperson filter. Only unused locations can be deleted.</p>
+
+              {/* Add new */}
+              <div style={card}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: '#A5B4FC', marginBottom: 14 }}>Add New Location</div>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: 200 }}>
+                    <input
+                      style={inp}
+                      value={newLocation}
+                      onChange={e => handleNewLocationInput(e.target.value)}
+                      placeholder="e.g. Devanahalli"
+                      onKeyDown={e => e.key === 'Enter' && canAddLoc && addLocation()}
+                    />
+                    {addLocWarning && (
+                      <div style={{ marginTop: 6, fontSize: 12, color: addLocIsDuplicate ? '#F87171' : '#F59E0B', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        {addLocIsDuplicate ? '✗' : '⚠'} {addLocWarning}
+                        {!addLocIsDuplicate && !addLocForce && (
+                          <button onClick={() => setAddLocForce(true)} style={{ fontSize: 11, background: 'rgba(245,158,11,0.2)', border: '1px solid rgba(245,158,11,0.4)', borderRadius: 4, padding: '2px 8px', color: '#F59E0B', cursor: 'pointer' }}>Yes, add anyway</button>
+                        )}
+                      </div>
+                    )}
+                    {addLocForce && <div style={{ marginTop: 4, fontSize: 11, color: '#10B981' }}>✓ Confirmed — click Add Location to save.</div>}
+                  </div>
+                  <button
+                    onClick={addLocation}
+                    disabled={!canAddLoc}
+                    style={{ background: 'linear-gradient(135deg,#4F46E5,#9333EA)', border: 'none', borderRadius: 8, padding: '10px 20px', color: 'white', fontWeight: 600, cursor: canAddLoc ? 'pointer' : 'default', fontSize: 14, opacity: canAddLoc ? 1 : 0.4, whiteSpace: 'nowrap' }}>
+                    + Add Location
+                  </button>
+                </div>
+                <div style={{ fontSize: 11, color: '#475569', marginTop: 10 }}>💡 Use full consistent names — "Sarjapur Road" not "Sarj Rd". This becomes the permanent filter value.</div>
+              </div>
+
+              {/* Locations table */}
+              <div style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid rgba(79,70,229,0.2)' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
+                  <thead>
+                    <tr style={{ background: 'rgba(79,70,229,0.2)' }}>
+                      <th style={{ padding: '12px 16px', textAlign: 'left', color: '#A5B4FC', fontWeight: 600 }}>Location</th>
+                      <th style={{ padding: '12px 16px', textAlign: 'center', color: '#A5B4FC', fontWeight: 600 }}>Projects</th>
+                      <th style={{ padding: '12px 16px', textAlign: 'right', color: '#A5B4FC', fontWeight: 600 }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {locations.map(loc => {
+                      const count = locationCounts[loc.name] || 0
+                      return (
+                        <tr key={loc.id} style={{ borderTop: '1px solid rgba(79,70,229,0.12)' }}>
+                          <td style={{ padding: '13px 16px', fontWeight: 500 }}>{loc.name}</td>
+                          <td style={{ padding: '13px 16px', textAlign: 'center' }}>
+                            {count > 0
+                              ? <span style={{ background: 'rgba(99,102,241,0.2)', color: '#A5B4FC', padding: '2px 10px', borderRadius: 12, fontSize: 12 }}>{count} project{count > 1 ? 's' : ''}</span>
+                              : <span style={{ color: '#475569', fontSize: 12 }}>—</span>
+                            }
+                          </td>
+                          <td style={{ padding: '13px 16px', textAlign: 'right' }}>
+                            {count > 0
+                              ? <span title="Reassign projects first" style={{ fontSize: 12, color: '#475569' }}>🔒 In use</span>
+                              : <button onClick={() => deleteLocation(loc.id, loc.name)} style={{ background: 'rgba(239,68,68,0.15)', border: 'none', borderRadius: 6, padding: '5px 14px', color: '#F87171', cursor: 'pointer', fontSize: 13 }}>🗑 Delete</button>
+                            }
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
@@ -397,7 +588,6 @@ export default function AdminPanel({ user, onGoHome, onLogout }: Props) {
                 </div>
                 <button onClick={addTeamMember} style={{ background: 'linear-gradient(135deg,#4F46E5,#9333EA)', border: 'none', borderRadius: 7, padding: '10px 22px', color: 'white', fontWeight: 600, cursor: 'pointer', fontSize: 14 }}>+ Add Salesperson</button>
               </div>
-
               <div>
                 {team.map(m => (
                   <div key={m.id} style={{ background: 'rgba(79,70,229,0.08)', border: '1px solid rgba(79,70,229,0.2)', borderRadius: 10, padding: 16, marginBottom: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
