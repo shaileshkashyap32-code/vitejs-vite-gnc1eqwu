@@ -362,6 +362,23 @@ Return ONLY valid JSON, no markdown, no citation numbers inside text:
     }
   }
 
+  // ─── Image upload ────────────────────────────────────────────────────────────
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (file.size > 5 * 1024 * 1024) { flash('Image too large. Max 5MB.', 'err'); return }
+    setUploadingImage(true)
+    const fileName = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`
+    const { data, error } = await supabase.storage
+      .from('project-images')
+      .upload(fileName, file, { contentType: file.type })
+    if (error) { flash('Upload failed: ' + error.message, 'err'); setUploadingImage(false); return }
+    const { data: urlData } = supabase.storage.from('project-images').getPublicUrl(data.path)
+    setF('image_url', urlData.publicUrl)
+    flash('✅ Image uploaded successfully!')
+    setUploadingImage(false)
+  }
+
   // ─── Pitch script generation (section ⑥) ─────────────────────────────────
   const generatePitchScript = async () => {
     if (!form.name || !form.developer || !form.location) {
